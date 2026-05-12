@@ -1,4 +1,4 @@
-# Core ML
+# Core ML (Day 2)
 torch>=2.1.0
 transformers>=4.40.0
 peft>=0.10.0
@@ -7,15 +7,17 @@ trl>=0.8.0
 datasets>=2.18.0
 accelerate>=0.28.0
 
-# Data Pipeline
+# Data Pipeline (Day 1) - all use OpenAI-compatible API
 openai>=1.12.0
-anthropic>=0.18.0
-google-generativeai>=0.4.0
+httpx>=0.27.0
+tenacity>=8.2.0        # retry with exponential backoff
+python-dotenv>=1.0.0   # load API keys from .env
+aiofiles>=23.2.0       # async file I/O
+tqdm>=4.65.0
 
-# Demo
+# Demo (Day 3)
 gradio>=4.19.0
 
 # Utilities
 numpy>=1.24.0
 scikit-learn>=1.3.0
-tqdm>=4.65.0

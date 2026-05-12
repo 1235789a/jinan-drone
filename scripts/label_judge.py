@@ -1,167 +1,295 @@
 """
-Day 1 - Step 3: 结构化标注脚本
-用 GPT-4o 作为 Meta-Judge，对每组多模型回答进行结构化风险评估。
-核心原则：不是字符串相似度！而是语义层面的分歧判断。
+Day 1 - Step 3: Meta-Judge 结构化标注 (API 版本，零人工)
+
+用 Kimi-K2.6 作为 Meta-Judge，对每组三模型回答输出结构化风险标签。
+核心原则：语义判断，不是字符串相似度。
+
+- 断点续传：已完成的 id 不会重复评估
+- 实时写入 JSONL
+- 结构化 JSON 输出，自动校验
+- 失败样本自动重试
+
+使用:
+    python scripts/label_judge.py              # 处理所有 raw_responses.jsonl
+    python scripts/label_judge.py --mvp        # 只处理前 60 条
 """
 
+from __future__ import annotations
+
+import argparse
+import asyncio
 import json
 import os
-import asyncio
+import re
+import sys
+import time
 from pathlib import Path
-from typing import Optional
 
-# --- Configuration ---
+from tenacity import retry, stop_after_attempt, wait_exponential
+from tqdm.asyncio import tqdm as atqdm
+
+from providers import load_providers, make_client
+
 RAW_PATH = Path(__file__).parent.parent / "data" / "raw_responses.jsonl"
-OUTPUT_PATH = Path(__file__).parent.parent / "data" / "labeled_train.jsonl"
+LABELED_PATH = Path(__file__).parent.parent / "data" / "labeled_train.jsonl"
 STATS_PATH = Path(__file__).parent.parent / "data" / "stats.json"
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-MAX_CONCURRENT = 3
+JUDGE_PROVIDER = "kimi"
 
-# --- Meta-Judge Prompt ---
-JUDGE_SYSTEM_PROMPT = """You are a Reliability Risk Meta-Judge. Your job is to analyze multiple AI model responses to the same question and assess the RELIABILITY RISK level.
+JUDGE_SYSTEM_PROMPT = """You are a RELIABILITY RISK META-JUDGE. You evaluate groups of LLM responses to identify risk signals. You are NOT judging correctness — you assess TRUST RISK.
 
-You are NOT judging who is correct. You are assessing HOW MUCH RISK exists in trusting these answers.
+## Three Risk Dimensions (each 0-10)
 
-## Risk Dimensions (score 0-10 each):
+### 1. hallucination_risk
+Signs: suspiciously specific numbers without citation, invented studies/people/laws, claims violating known consensus, overconfidence on topics with known uncertainty.
+- 0: all responses cite well-known consensus facts
+- 5: one response has plausible but unverifiable specifics
+- 10: at least one response contains clearly fabricated content
 
-1. **Hallucination Risk**: Are any responses likely fabricated? Do they contain suspiciously specific details that seem invented? Do they contradict well-established knowledge?
+### 2. semantic_contradiction
+Signs: opposing final recommendations, incompatible numeric answers (not just precision differences), mutually exclusive factual claims.
+- 0: all responses agree on core claims
+- 5: partial disagreement on secondary details, core aligned
+- 10: direct contradictions on the central question
 
-2. **Semantic Contradiction**: Do the responses fundamentally disagree on key claims? Not just phrasing differences, but actual contradictions in substance, numbers, recommendations, or conclusions.
+### 3. uncertainty_signals
+Signs: inconsistent hedging across models (one certain, others hedging), overconfidence on genuinely uncertain topics.
+- 0: all well-calibrated
+- 5: mild mismatch
+- 10: one response dangerously overconfident on an uncertain topic
 
-3. **Uncertainty Signals**: Do responses contain hedging language? Do they acknowledge limitations? Does one model sound certain while others equivocate? Overconfidence in uncertain areas is a risk signal.
+## Final Risk Level (decisive rules)
+- "low": all dimensions <= 3 AND no red flags
+- "medium": any dimension 4-6, OR mixed signals without clear danger
+- "high": any dimension >= 7, OR clear hallucination, OR fundamental contradictions on high-stakes topics (medical/legal)
 
-## Risk Level Rules:
-- **low**: All models substantially agree, no hallucination indicators, appropriate confidence levels
-- **medium**: Some disagreement on details/nuances, OR one model shows uncertainty signals, OR minor factual discrepancies that don't affect core message
-- **high**: Fundamental contradictions between models, OR clear hallucination indicators, OR dangerous overconfidence on uncertain topics
+## Calibration Anchors
 
-## Output Format (strict JSON):
-{
-  "hallucination_risk": <0-10>,
-  "semantic_contradiction": <0-10>,  
-  "uncertainty_signals": <0-10>,
-  "final_risk_level": "<low|medium|high>",
-  "reasoning": "<2-3 sentences explaining the key risk factors>"
-}"""
+Example 1 (low): "Capital of France?" -> all say Paris -> all scores 0 -> low
+Example 2 (high): "Max acetaminophen for cirrhosis?" -> 3000mg vs 2000mg vs 4000mg -> halluc=6, contra=9, uncert=7 -> high
+Example 3 (medium): "Best PostgreSQL pool size for 1000 users?" -> 50 / 100-200 / 50-100 -> halluc=1, contra=4, uncert=3 -> medium
 
-JUDGE_USER_TEMPLATE = """Analyze the following multi-model responses:
+## Output Format (STRICT JSON, no markdown, no preamble)
+Output exactly ONE line of JSON:
 
-**Question:** {question}
+{"hallucination_risk": <0-10>, "semantic_contradiction": <0-10>, "uncertainty_signals": <0-10>, "final_risk_level": "<low|medium|high>", "reasoning": "<2 short sentences>"}
 
-**Response A (GPT-4o):**
-{response_gpt4o}
-
-**Response B (Claude 3.5):**
-{response_claude}
-
-**Response C (Gemini 1.5):**
-{response_gemini}
-
-Provide your structured risk assessment as JSON."""
+No other text. No explanation before or after."""
 
 
-async def judge_single(semaphore, item: dict) -> Optional[dict]:
-    """用 GPT-4o 对单条数据进行结构化标注"""
-    async with semaphore:
-        user_prompt = JUDGE_USER_TEMPLATE.format(
-            question=item["question"],
-            response_gpt4o=item["responses"].get("gpt4o", "[No response]"),
-            response_claude=item["responses"].get("claude", "[No response]"),
-            response_gemini=item["responses"].get("gemini", "[No response]"),
-        )
+def build_judge_prompt(record: dict) -> str:
+    resp = record["responses"]
+    return f"""Analyze this group of LLM responses:
 
-        # TODO: 替换为真实 API 调用
-        # import openai
-        # client = openai.AsyncOpenAI(api_key=OPENAI_API_KEY)
-        # response = await client.chat.completions.create(
-        #     model="gpt-4o",
-        #     messages=[
-        #         {"role": "system", "content": JUDGE_SYSTEM_PROMPT},
-        #         {"role": "user", "content": user_prompt},
-        #     ],
-        #     temperature=0,
-        #     response_format={"type": "json_object"},
-        # )
-        # judgment = json.loads(response.choices[0].message.content)
+Q: {record['question']}
 
-        # Placeholder
-        judgment = {
-            "hallucination_risk": 5,
-            "semantic_contradiction": 5,
-            "uncertainty_signals": 5,
-            "final_risk_level": "medium",
-            "reasoning": "[PLACEHOLDER - replace with real GPT-4o judge output]",
-        }
+A (DeepSeek): {resp.get('deepseek', '[no response]')}
 
-        return {
-            **item,
-            "judgment": judgment,
-        }
+B (GLM): {resp.get('glm', '[no response]')}
+
+C (Qwen): {resp.get('qwen', '[no response]')}
+
+Output your structured risk assessment as a single JSON line."""
 
 
-def compute_stats(labeled_data: list) -> dict:
-    """计算数据分布统计"""
-    total = len(labeled_data)
-    distribution = {"low": 0, "medium": 0, "high": 0}
-    domain_dist = {}
-    
-    for item in labeled_data:
-        level = item["judgment"]["final_risk_level"]
-        distribution[level] = distribution.get(level, 0) + 1
-        
-        domain = item.get("domain", "unknown")
-        if domain not in domain_dist:
-            domain_dist[domain] = {"low": 0, "medium": 0, "high": 0}
-        domain_dist[domain][level] += 1
+def extract_json(text: str) -> dict | None:
+    """Extract a JSON object from the model's response (handles some formatting noise)."""
+    # Strip markdown fences if present
+    text = text.strip()
+    text = re.sub(r"^```(?:json)?\s*", "", text)
+    text = re.sub(r"\s*```$", "", text)
 
+    # Try direct parse first
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    # Find first {...} block
+    match = re.search(r"\{.*\}", text, re.DOTALL)
+    if match:
+        try:
+            return json.loads(match.group(0))
+        except json.JSONDecodeError:
+            return None
+    return None
+
+
+def validate_label(label: dict | None) -> bool:
+    if not isinstance(label, dict):
+        return False
+    for k in ("hallucination_risk", "semantic_contradiction", "uncertainty_signals"):
+        v = label.get(k)
+        if not isinstance(v, (int, float)) or not 0 <= v <= 10:
+            return False
+    if label.get("final_risk_level") not in ("low", "medium", "high"):
+        return False
+    return True
+
+
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=2, min=2, max=30), reraise=True)
+async def judge_one(client, model: str, record: dict) -> dict | None:
+    prompt = build_judge_prompt(record)
+    resp = await client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": JUDGE_SYSTEM_PROMPT},
+            {"role": "user", "content": prompt},
+        ],
+        temperature=0,
+        max_tokens=300,
+    )
+    text = (resp.choices[0].message.content or "").strip()
+    label = extract_json(text)
+    if not validate_label(label):
+        return None
+    # Normalize scores to int
+    for k in ("hallucination_risk", "semantic_contradiction", "uncertainty_signals"):
+        label[k] = int(label[k])
+    return label
+
+
+async def process_one(record: dict, client, model: str, sem: asyncio.Semaphore) -> dict | None:
+    async with sem:
+        try:
+            label = await judge_one(client, model, record)
+        except Exception as e:
+            print(f"  [id={record['id']}] judge error: {type(e).__name__}", file=sys.stderr)
+            return None
+        if not label:
+            return None
+        return {**record, "judgment": label}
+
+
+def load_raw() -> list[dict]:
+    if not RAW_PATH.exists():
+        print(f"ERROR: {RAW_PATH} not found. Run call_models.py first.", file=sys.stderr)
+        sys.exit(1)
+    records = []
+    with open(RAW_PATH, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                records.append(json.loads(line))
+    return records
+
+
+def load_labeled_ids() -> set[int]:
+    done = set()
+    if LABELED_PATH.exists():
+        with open(LABELED_PATH, encoding="utf-8") as f:
+            for line in f:
+                try:
+                    obj = json.loads(line)
+                    if "judgment" in obj:
+                        done.add(obj["id"])
+                except json.JSONDecodeError:
+                    continue
+    return done
+
+
+def compute_stats(labeled: list[dict]) -> dict:
+    from collections import Counter
+    levels = Counter(r["judgment"]["final_risk_level"] for r in labeled)
+    domains = Counter(r["domain"] for r in labeled)
+    langs = Counter(r["lang"] for r in labeled)
+
+    cross = {}
+    for r in labeled:
+        d = r["domain"]
+        lv = r["judgment"]["final_risk_level"]
+        cross.setdefault(d, Counter())[lv] += 1
+
+    total = len(labeled)
     return {
         "total_samples": total,
-        "distribution": distribution,
-        "distribution_pct": {k: round(v/total*100, 1) for k, v in distribution.items()},
-        "domain_distribution": domain_dist,
-        "quality_check": {
-            "min_class_pct": min(v/total*100 for v in distribution.values()),
-            "max_class_pct": max(v/total*100 for v in distribution.values()),
-            "balanced": all(20 <= v/total*100 <= 50 for v in distribution.values()),
-        }
+        "level_distribution": dict(levels),
+        "level_pct": {k: round(v / total * 100, 1) for k, v in levels.items()} if total else {},
+        "domain_distribution": dict(domains),
+        "lang_distribution": dict(langs),
+        "domain_x_level": {k: dict(v) for k, v in cross.items()},
+        "balanced": all(15 <= v / total * 100 <= 55 for v in levels.values()) if total else False,
     }
 
 
 async def main():
-    # Load raw responses
-    raw_data = []
-    with open(RAW_PATH, "r", encoding="utf-8") as f:
-        for line in f:
-            raw_data.append(json.loads(line))
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--mvp", action="store_true", help="Only label first 60")
+    parser.add_argument("--limit", type=int)
+    parser.add_argument("--no-resume", action="store_true")
+    args = parser.parse_args()
 
-    print(f"📋 Loaded {len(raw_data)} response sets for labeling")
+    providers = load_providers()
+    if JUDGE_PROVIDER not in providers:
+        print(f"ERROR: judge provider '{JUDGE_PROVIDER}' not configured.", file=sys.stderr)
+        print(f"Available: {list(providers.keys())}", file=sys.stderr)
+        sys.exit(1)
 
-    # Run judge
-    semaphore = asyncio.Semaphore(MAX_CONCURRENT)
-    tasks = [judge_single(semaphore, item) for item in raw_data]
-    results = await asyncio.gather(*tasks)
+    p = providers[JUDGE_PROVIDER]
+    client = make_client(p)
+    print(f"Meta-Judge: {p.name} ({p.model})")
 
-    # Filter valid results
-    labeled = [r for r in results if r is not None]
+    records = load_raw()
+    if args.mvp:
+        records = records[:60]
+    elif args.limit:
+        records = records[:args.limit]
 
-    # Write labeled data
-    OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with open(OUTPUT_PATH, "w", encoding="utf-8") as f:
-        for item in labeled:
-            f.write(json.dumps(item, ensure_ascii=False) + "\n")
+    done_ids = set() if args.no_resume else load_labeled_ids()
+    todo = [r for r in records if r["id"] not in done_ids]
+    print(f"Total records: {len(records)} | Done: {len(done_ids)} | TODO: {len(todo)}")
 
-    # Compute and write stats
+    if not todo:
+        print("Nothing to do.")
+        # Still report stats on existing
+        with open(LABELED_PATH, encoding="utf-8") as f:
+            labeled = [json.loads(l) for l in f if l.strip()]
+        stats = compute_stats(labeled)
+        with open(STATS_PATH, "w", encoding="utf-8") as f:
+            json.dump(stats, f, indent=2, ensure_ascii=False)
+        print(json.dumps(stats["level_pct"], indent=2))
+        return
+
+    max_concurrent = int(os.getenv("MAX_CONCURRENT", "5"))
+    sem = asyncio.Semaphore(max_concurrent)
+
+    LABELED_PATH.parent.mkdir(parents=True, exist_ok=True)
+    mode = "w" if args.no_resume else "a"
+
+    t0 = time.time()
+    ok = 0
+    bad = 0
+    with open(LABELED_PATH, mode, encoding="utf-8") as fout:
+        tasks = [process_one(r, client, p.model, sem) for r in todo]
+        for coro in atqdm.as_completed(tasks, total=len(tasks), desc="Judging"):
+            result = await coro
+            if result:
+                fout.write(json.dumps(result, ensure_ascii=False) + "\n")
+                fout.flush()
+                ok += 1
+            else:
+                bad += 1
+
+    dt = time.time() - t0
+
+    # Final stats
+    with open(LABELED_PATH, encoding="utf-8") as f:
+        labeled = [json.loads(l) for l in f if l.strip()]
     stats = compute_stats(labeled)
     with open(STATS_PATH, "w", encoding="utf-8") as f:
         json.dump(stats, f, indent=2, ensure_ascii=False)
 
-    print(f"\n✅ Labeled {len(labeled)} samples")
-    print(f"   Distribution: {stats['distribution']}")
-    print(f"   Percentages:  {stats['distribution_pct']}")
-    print(f"   Balanced:     {stats['quality_check']['balanced']}")
-    print(f"\n   Output: {OUTPUT_PATH}")
-    print(f"   Stats:  {STATS_PATH}")
+    print(f"\n{'=' * 60}")
+    print(f"Done in {dt:.1f}s ({len(todo)/dt*60:.1f} req/min)")
+    print(f"  Labeled: {ok} | Failed: {bad}")
+    print(f"\nRisk Level Distribution:")
+    for lv in ("low", "medium", "high"):
+        pct = stats["level_pct"].get(lv, 0)
+        cnt = stats["level_distribution"].get(lv, 0)
+        print(f"  {lv:8s}: {cnt:4d} ({pct:5.1f}%)")
+    print(f"\nBalanced: {stats['balanced']}")
+    print(f"Output: {LABELED_PATH}")
+    print(f"Stats:  {STATS_PATH}")
 
 
 if __name__ == "__main__":

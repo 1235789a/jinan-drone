@@ -26,6 +26,7 @@ data/val_chat.jsonl
 # Secrets
 .env
 *.env
+!.env.example
 
 # IDE
 .vscode/
