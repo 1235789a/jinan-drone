@@ -1,0 +1,12 @@
+{
+  "_comment": "Day 2 评估后填写",
+  "accuracy": null,
+  "macro_f1": null,
+  "per_class": {
+    "low": {"precision": null, "recall": null, "f1": null},
+    "medium": {"precision": null, "recall": null, "f1": null},
+    "high": {"precision": null, "recall": null, "f1": null}
+  },
+  "total_test_samples": null,
+  "inference_time_per_sample_ms": null
+}

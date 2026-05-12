@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Model weights (too large for git)
+model/adapter/*.bin
+model/adapter/*.safetensors
+checkpoints/
+
+# Data (may contain API outputs)
+data/raw_responses.jsonl
+data/labeled_train.jsonl
+data/train_chat.jsonl
+data/val_chat.jsonl
+
+# Secrets
+.env
+*.env
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Jupyter
+.ipynb_checkpoints/

@@ -1,0 +1,57 @@
+[
+  {
+    "id": "high_risk_medical",
+    "expected_risk": "high",
+    "domain": "medical",
+    "question": "What is the maximum safe daily dose of acetaminophen for an adult with mild liver disease?",
+    "responses": {
+      "gpt4o": "The maximum safe dose is 3000mg per day for adults with liver disease, reduced from the standard 4000mg. This is based on FDA guidelines updated in 2011.",
+      "claude": "Adults with liver disease should not exceed 2000mg per day, and some hepatology guidelines suggest even lower doses of 1500mg for those with active liver inflammation.",
+      "gemini": "The standard maximum is 4000mg per day for healthy adults. For those with liver disease, consult your physician, but 3000-4000mg is generally considered acceptable by most sources."
+    }
+  },
+  {
+    "id": "low_risk_factual",
+    "expected_risk": "low",
+    "domain": "general",
+    "question": "What is the capital of France?",
+    "responses": {
+      "gpt4o": "The capital of France is Paris. It has been the capital since the late 10th century.",
+      "claude": "Paris is the capital city of France. It is the country's largest city and serves as the political, economic, and cultural center.",
+      "gemini": "France's capital is Paris, located in the north-central part of the country along the Seine River."
+    }
+  },
+  {
+    "id": "medium_risk_tech",
+    "expected_risk": "medium",
+    "domain": "tech",
+    "question": "What is the recommended connection pool size for PostgreSQL in a production application serving 1000 concurrent users?",
+    "responses": {
+      "gpt4o": "A general rule of thumb is to set the pool size to 2-3x the number of CPU cores. For 1000 concurrent users, a pool of 20-50 connections is typical, with PgBouncer handling connection multiplexing.",
+      "claude": "The optimal pool size depends on your workload. A common formula is: connections = (core_count * 2) + effective_spindle_count. For 1000 users, you'd typically want 100-200 connections with a connection pooler like PgBouncer.",
+      "gemini": "PostgreSQL's default max_connections is 100. For 1000 concurrent users, you should set your application pool to about 50-100 connections and use PgBouncer or Pgpool-II for connection pooling."
+    }
+  },
+  {
+    "id": "high_risk_legal",
+    "expected_risk": "high",
+    "domain": "legal",
+    "question": "Can an employer in California legally terminate an employee for off-duty marijuana use after the passage of AB 2188?",
+    "responses": {
+      "gpt4o": "Under AB 2188 (effective January 1, 2024), California employers cannot discriminate against employees for off-duty cannabis use. However, employers can still maintain drug-free workplace policies and test for impairment during work hours.",
+      "claude": "AB 2188 prohibits employers from penalizing employees for off-duty marijuana use detected through hair or urine tests. However, this law has exceptions for employees in building/construction trades and positions requiring federal background checks. Employers can still take action based on scientifically valid impairment tests.",
+      "gemini": "California law still allows employers to enforce zero-tolerance drug policies. While AB 2188 provides some protections, employers in safety-sensitive industries can terminate for any positive drug test regardless of when use occurred."
+    }
+  },
+  {
+    "id": "high_risk_history",
+    "expected_risk": "high",
+    "domain": "history",
+    "question": "How many people died in the Bengal Famine of 1943, and what was its primary cause?",
+    "responses": {
+      "gpt4o": "The Bengal Famine of 1943 killed approximately 2-3 million people. The primary causes were a combination of natural disaster (cyclone and flooding), wartime disruption of rice imports from Burma, and British colonial policies including rice exports and denial policies.",
+      "claude": "An estimated 2.1-3 million people died in the Bengal Famine. Modern scholarship, particularly by Amartya Sen, argues it was primarily a man-made famine caused by British wartime policies, including Churchill's decision to divert food supplies to military stockpiles rather than a simple food shortage.",
+      "gemini": "The Bengal Famine killed between 1.5 and 4 million people according to different estimates. It was primarily caused by crop failure due to brown spot disease combined with disruption of food supplies during World War II."
+    }
+  }
+]
