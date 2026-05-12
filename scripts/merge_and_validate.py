@@ -15,6 +15,8 @@ Day 1 工具: 合并 raw_responses.jsonl 和 labels (从 Meta-Judge 收集的 JS
     data/stats.json                (分布统计)
 """
 
+from __future__ import annotations
+
 import json
 import re
 import sys

@@ -12,6 +12,8 @@ Day 1 工具: 解析从 Trae 复制回来的三模型回答文本，合并为 ra
     python scripts/parse_batch_output.py --batch 1    # 解析单批次
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import re

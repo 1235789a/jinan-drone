@@ -33,11 +33,13 @@ class ProviderConfig:
 
 
 # SiliconFlow model routing (when using the aggregator)
+# Updated for 2026-05. Using Flash variants where available to stretch the 14 CNY free credit.
+# Upgrade to Pro variants if you have paid credits.
 SILICONFLOW_MODELS = {
-    "deepseek": "deepseek-ai/DeepSeek-V3",          # upgrade to DeepSeek-V4-Pro when available
-    "glm": "zai-org/GLM-4.5",                       # upgrade to GLM-5.1 when available
-    "qwen": "Qwen/Qwen3-235B-A22B",                 # or Qwen3.6-Plus when available
-    "kimi": "moonshotai/Kimi-K2-Instruct",          # Kimi-K2.6 when available
+    "deepseek": "deepseek-ai/DeepSeek-V4-Flash",     # or DeepSeek-V4-Pro for flagship quality
+    "glm": "zai-org/GLM-4.5",                         # upgrade to GLM-5.1 if listed in your tier
+    "qwen": "Qwen/Qwen3-235B-A22B",                   # or Qwen3.6-Plus-equivalent as listed
+    "kimi": "moonshotai/Kimi-K2.6",                   # K2.6 for judge (released Apr 2026)
 }
 
 
