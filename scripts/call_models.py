@@ -1,16 +1,17 @@
 """
-Day 1 - Step 2: 三模型并发调用 (API 版本，零人工)
+Day 1 - Step 2: Concurrent multi-model response collection (API, zero human touch)
 
-对每条种子问题，并发调用 DeepSeek / GLM / Qwen 获取回答。
-- 断点续传：已完成的 id 不会重复调用
-- 实时写入 JSONL：中途挂了也不会丢数据
-- 并发限流：每个 provider 独立 semaphore
-- 进度条 + 实时统计
+For each seed question, query all configured DATA-SOURCE models in parallel.
+- Resume-safe: already-processed ids in the output file are skipped
+- Per-provider rate limiting via independent semaphores
+- Real-time JSONL writes (no data loss on crash)
+- tqdm progress bar
 
-使用:
-    python scripts/call_models.py              # 处理所有 seeds.jsonl
-    python scripts/call_models.py --mvp        # 只处理前 60 条
-    python scripts/call_models.py --limit 100  # 只处理前 N 条
+Usage:
+    python scripts/call_models.py              # process all seeds.jsonl
+    python scripts/call_models.py --mvp        # only first 60
+    python scripts/call_models.py --limit 100  # only first N
+    python scripts/call_models.py --no-resume  # ignore existing output
 """
 
 from __future__ import annotations
@@ -26,24 +27,25 @@ from pathlib import Path
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from tqdm.asyncio import tqdm as atqdm
 
-from providers import ProviderConfig, load_providers, make_client
+from providers import load_providers, make_client
 
 SEEDS_PATH = Path(__file__).parent.parent / "data" / "seeds.jsonl"
 RAW_RESPONSES_PATH = Path(__file__).parent.parent / "data" / "raw_responses.jsonl"
 
-DATA_SOURCES = ["deepseek", "glm", "qwen"]  # Kimi reserved for judge
+# Data-source providers. `claude` is reserved for the Judge, not queried here.
+DATA_SOURCES = ["deepseek", "glm", "qwen", "gemini"]
 
 SYSTEM_PROMPT = """You are a deterministic answer API.
 
 ## Answer Rules
-1. Answer from your internal parameter knowledge. DO NOT add "I need to search" or "please consult an expert".
+1. Answer from your internal parameter knowledge. Do not hedge with "I need to search" or "consult an expert".
 2. Each answer must be 80-160 words. No shorter, no longer.
 3. Plain text only. No markdown, no bullets, no headers, no bold.
-4. Do NOT add disclaimers like "consult a doctor/lawyer". Answer the actual question directly.
-5. Maintain your natural reasoning style: if you are confident, be confident; if uncertain, express it. Do not artificially hedge or over-commit.
-6. Reply in the SAME LANGUAGE as the question (English in, English out; 中文问,中文答).
-7. Do NOT show reasoning steps. Just the final answer.
-8. Output the answer as plain text, no preamble like "Here is the answer:"."""
+4. No disclaimers like "consult a doctor/lawyer". Answer the actual question.
+5. Keep your natural voice: if confident be confident, if uncertain say so. Do not artificially hedge or over-commit.
+6. Reply in the SAME LANGUAGE as the question.
+7. Do not show reasoning steps. Output only the final answer.
+8. No preamble like "Here is the answer:"."""
 
 
 @retry(
@@ -53,7 +55,6 @@ SYSTEM_PROMPT = """You are a deterministic answer API.
     reraise=True,
 )
 async def call_one_model(client, model: str, question: str) -> str:
-    """Call a single model, with retry."""
     resp = await client.chat.completions.create(
         model=model,
         messages=[
@@ -68,11 +69,10 @@ async def call_one_model(client, model: str, question: str) -> str:
 
 async def process_one_seed(
     seed: dict,
-    clients: dict[str, tuple],  # name -> (client, model)
-    semaphores: dict[str, asyncio.Semaphore],
+    clients: dict,
+    semaphores: dict,
 ) -> dict:
-    """Query all configured data-source models for one question."""
-    async def _one(provider_name: str) -> tuple[str, str | None, str | None]:
+    async def _one(provider_name: str):
         client, model = clients[provider_name]
         sem = semaphores[provider_name]
         async with sem:
@@ -83,9 +83,7 @@ async def process_one_seed(
                 return provider_name, None, f"{type(e).__name__}: {str(e)[:120]}"
 
     results = await asyncio.gather(*[_one(name) for name in clients.keys()])
-
-    responses = {}
-    errors = {}
+    responses, errors = {}, {}
     for name, answer, err in results:
         if answer:
             responses[name] = answer
@@ -103,10 +101,9 @@ async def process_one_seed(
     }
 
 
-def load_seeds() -> list[dict]:
+def load_seeds() -> list:
     if not SEEDS_PATH.exists():
-        print(f"ERROR: {SEEDS_PATH} not found. Run generate_seeds.py first.",
-              file=sys.stderr)
+        print(f"ERROR: {SEEDS_PATH} not found. Run generate_seeds.py first.", file=sys.stderr)
         sys.exit(1)
     seeds = []
     with open(SEEDS_PATH, encoding="utf-8") as f:
@@ -117,16 +114,15 @@ def load_seeds() -> list[dict]:
     return seeds
 
 
-def load_completed_ids() -> set[int]:
-    """Read already-processed ids from the output file (for resume)."""
+def load_completed_ids(min_responses: int) -> set:
+    """Read already-processed ids with enough valid responses (for resume)."""
     done = set()
     if RAW_RESPONSES_PATH.exists():
         with open(RAW_RESPONSES_PATH, encoding="utf-8") as f:
             for line in f:
                 try:
                     obj = json.loads(line)
-                    # Require at least 2 valid responses to count as "done"
-                    if len(obj.get("responses", {})) >= 2:
+                    if len(obj.get("responses", {})) >= min_responses:
                         done.add(obj["id"])
                 except json.JSONDecodeError:
                     continue
@@ -136,73 +132,77 @@ def load_completed_ids() -> set[int]:
 async def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--mvp", action="store_true", help="Process only first 60 seeds")
-    parser.add_argument("--limit", type=int, help="Process only first N seeds")
-    parser.add_argument("--no-resume", action="store_true",
-                        help="Ignore existing output and reprocess all")
+    parser.add_argument("--limit", type=int)
+    parser.add_argument("--no-resume", action="store_true")
+    parser.add_argument("--min-responses", type=int, default=3,
+                        help="Min valid responses per seed to be considered 'done' (default 3)")
     args = parser.parse_args()
 
-    # Load providers
     providers = load_providers()
-    missing = [name for name in DATA_SOURCES if name not in providers]
-    if missing:
-        print(f"ERROR: missing data-source providers: {missing}", file=sys.stderr)
-        print(f"Configured: {list(providers.keys())}", file=sys.stderr)
+    configured_sources = [n for n in DATA_SOURCES if n in providers]
+    missing = [n for n in DATA_SOURCES if n not in providers]
+
+    if len(configured_sources) < 2:
+        print(f"ERROR: need at least 2 data-source providers, got {configured_sources}",
+              file=sys.stderr)
+        print(f"Configure at least 2 of: {DATA_SOURCES}", file=sys.stderr)
         sys.exit(1)
 
-    clients: dict[str, tuple] = {}
-    for name in DATA_SOURCES:
+    if missing:
+        print(f"WARN: data-source providers missing from .env: {missing}")
+        print(f"      proceeding with {len(configured_sources)} providers: {configured_sources}")
+
+    clients = {}
+    for name in configured_sources:
         p = providers[name]
         clients[name] = (make_client(p), p.model)
+        print(f"  Data source [{name:8s}] -> {p.model}")
 
-    # Per-provider semaphore (each provider has its own rate limits)
     max_concurrent = int(os.getenv("MAX_CONCURRENT", "5"))
-    semaphores = {name: asyncio.Semaphore(max_concurrent) for name in DATA_SOURCES}
+    semaphores = {name: asyncio.Semaphore(max_concurrent) for name in configured_sources}
 
-    # Load seeds + filter
     seeds = load_seeds()
     if args.mvp:
         seeds = seeds[:60]
     elif args.limit:
         seeds = seeds[:args.limit]
 
-    done_ids = set() if args.no_resume else load_completed_ids()
+    done_ids = set() if args.no_resume else load_completed_ids(
+        min_responses=min(args.min_responses, len(configured_sources)))
     todo = [s for s in seeds if s["id"] not in done_ids]
 
-    print(f"Total seeds: {len(seeds)} | Already done: {len(done_ids)} | TODO: {len(todo)}")
+    print(f"\nTotal seeds: {len(seeds)} | Done: {len(done_ids)} | TODO: {len(todo)}")
     if not todo:
         print("Nothing to do. Use --no-resume to reprocess.")
         return
 
-    # Process with progress bar; write as we go
     RAW_RESPONSES_PATH.parent.mkdir(parents=True, exist_ok=True)
     mode = "w" if args.no_resume else "a"
 
     t0 = time.time()
-    success = 0
-    partial = 0
-    failed = 0
+    success, partial, failed = 0, 0, 0
 
     with open(RAW_RESPONSES_PATH, mode, encoding="utf-8") as fout:
         tasks = [process_one_seed(seed, clients, semaphores) for seed in todo]
         for coro in atqdm.as_completed(tasks, total=len(tasks), desc="Calling models"):
             result = await coro
             n_valid = len(result["responses"])
-            if n_valid == 3:
+            if n_valid == len(configured_sources):
                 success += 1
             elif n_valid >= 2:
                 partial += 1
             else:
                 failed += 1
-                continue  # skip writing records with <2 valid responses
+                continue
             fout.write(json.dumps(result, ensure_ascii=False) + "\n")
             fout.flush()
 
     dt = time.time() - t0
     print(f"\n{'=' * 60}")
-    print(f"Done in {dt:.1f}s ({len(todo)/dt*60:.1f} req/min)")
-    print(f"  Full success (3/3):  {success}")
-    print(f"  Partial (2/3):       {partial}")
-    print(f"  Failed (<2/3):       {failed}")
+    print(f"Done in {dt:.1f}s ({len(todo)/max(dt, 0.01)*60:.1f} req/min)")
+    print(f"  Full ({len(configured_sources)}/{len(configured_sources)}): {success}")
+    print(f"  Partial (>=2):                    {partial}")
+    print(f"  Failed (<2):                      {failed}")
     print(f"  Output: {RAW_RESPONSES_PATH}")
 
 

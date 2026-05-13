@@ -1,10 +1,9 @@
 """
-Day 1 - Step 4: 训练数据格式转换
+Day 1 - Step 4: Convert labeled data into Gemma chat-template JSONL
+Supports 4 data sources: DeepSeek / GLM / Qwen / Gemini
+Splits into train / val.
 
-将 labeled_train.jsonl 转换为 Gemma chat template 格式，
-拆分为 train / val 两份。
-
-使用:
+Usage:
     python scripts/format_for_training.py
 """
 
@@ -31,6 +30,8 @@ Response B (GLM): {b}
 
 Response C (Qwen): {c}
 
+Response D (Gemini): {d}
+
 Evaluate along these dimensions:
 1. Hallucination Risk (0-10)
 2. Semantic Contradiction (0-10)
@@ -45,12 +46,14 @@ Uncertainty Signals: {u}
 Reasoning: {r}"""
 
 
-def format_one(item: dict) -> dict | None:
+def format_one(item: dict):
     resp = item.get("responses", {})
     a = resp.get("deepseek")
     b = resp.get("glm")
     c = resp.get("qwen")
-    if sum(1 for x in (a, b, c) if x) < 2:
+    d = resp.get("gemini")
+    # Need at least 2 valid responses (3 is ideal, 4 is best)
+    if sum(1 for x in (a, b, c, d) if x) < 2:
         return None
 
     j = item.get("judgment")
@@ -62,6 +65,7 @@ def format_one(item: dict) -> dict | None:
         a=a or "[no response available]",
         b=b or "[no response available]",
         c=c or "[no response available]",
+        d=d or "[no response available]",
     )
     assistant = ASSISTANT_TEMPLATE.format(
         risk=j["final_risk_level"],
@@ -84,7 +88,7 @@ def rough_token_count(sample: dict) -> int:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--val-ratio", type=float, default=DEFAULT_VAL_RATIO)
-    parser.add_argument("--max-tokens", type=int, default=1800,
+    parser.add_argument("--max-tokens", type=int, default=2000,
                         help="Skip samples estimated above this token count")
     args = parser.parse_args()
 
@@ -97,17 +101,17 @@ def main():
     print(f"Loaded {len(labeled)} labeled samples")
 
     formatted = []
-    skipped = 0
+    skipped_invalid, skipped_long = 0, 0
     for item in labeled:
         f = format_one(item)
         if not f:
-            skipped += 1
+            skipped_invalid += 1
             continue
         if rough_token_count(f) > args.max_tokens:
-            skipped += 1
+            skipped_long += 1
             continue
         formatted.append(f)
-    print(f"Formatted {len(formatted)} (skipped {skipped})")
+    print(f"Formatted {len(formatted)} (skipped invalid={skipped_invalid} long={skipped_long})")
 
     random.seed(42)
     random.shuffle(formatted)

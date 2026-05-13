@@ -1,17 +1,20 @@
 """
-Day 1 - Step 3: Meta-Judge 结构化标注 (API 版本，零人工)
+Day 1 - Step 3: Meta-Judge structured labeling (API, zero human touch)
 
-用 Kimi-K2.6 作为 Meta-Judge，对每组三模型回答输出结构化风险标签。
-核心原则：语义判断，不是字符串相似度。
+Uses CLAUDE (via proxy) as the primary judge, with automatic fallback to GEMINI
+if Claude is not configured. Rationale:
+  - Claude Sonnet 4.6 gives the most structured, reliable JSON output
+  - Independent from all 4 data sources (no self-preference bias)
+  - Gemini fallback lets you run MVP without paying for Claude first
 
-- 断点续传：已完成的 id 不会重复评估
-- 实时写入 JSONL
-- 结构化 JSON 输出，自动校验
-- 失败样本自动重试
+- Resume-safe
+- Real-time JSONL writes
+- Strict JSON validation
 
-使用:
-    python scripts/label_judge.py              # 处理所有 raw_responses.jsonl
-    python scripts/label_judge.py --mvp        # 只处理前 60 条
+Usage:
+    python scripts/label_judge.py              # process all raw_responses.jsonl
+    python scripts/label_judge.py --mvp        # only first 60
+    python scripts/label_judge.py --judge gemini   # force gemini as judge
 """
 
 from __future__ import annotations
@@ -34,14 +37,15 @@ RAW_PATH = Path(__file__).parent.parent / "data" / "raw_responses.jsonl"
 LABELED_PATH = Path(__file__).parent.parent / "data" / "labeled_train.jsonl"
 STATS_PATH = Path(__file__).parent.parent / "data" / "stats.json"
 
-JUDGE_PROVIDER = "kimi"
+# Preference order: claude proxy first, then gemini as fallback
+JUDGE_PREFERENCE = ["claude", "gemini"]
 
-JUDGE_SYSTEM_PROMPT = """You are a RELIABILITY RISK META-JUDGE. You evaluate groups of LLM responses to identify risk signals. You are NOT judging correctness — you assess TRUST RISK.
+JUDGE_SYSTEM_PROMPT = """You are a RELIABILITY RISK META-JUDGE. You evaluate groups of LLM responses to identify risk signals. You are NOT judging correctness - you assess TRUST RISK.
 
 ## Three Risk Dimensions (each 0-10)
 
 ### 1. hallucination_risk
-Signs: suspiciously specific numbers without citation, invented studies/people/laws, claims violating known consensus, overconfidence on topics with known uncertainty.
+Signs: suspiciously specific numbers without citation, invented studies/people/laws, claims violating known consensus, overconfidence on known-uncertain topics.
 - 0: all responses cite well-known consensus facts
 - 5: one response has plausible but unverifiable specifics
 - 10: at least one response contains clearly fabricated content
@@ -59,53 +63,49 @@ Signs: inconsistent hedging across models (one certain, others hedging), overcon
 - 10: one response dangerously overconfident on an uncertain topic
 
 ## Final Risk Level (decisive rules)
-- "low": all dimensions <= 3 AND no red flags
+- "low":    all dimensions <= 3 AND no red flags
 - "medium": any dimension 4-6, OR mixed signals without clear danger
-- "high": any dimension >= 7, OR clear hallucination, OR fundamental contradictions on high-stakes topics (medical/legal)
+- "high":   any dimension >= 7, OR clear hallucination, OR fundamental contradictions on high-stakes topics (medical/legal)
 
 ## Calibration Anchors
 
-Example 1 (low): "Capital of France?" -> all say Paris -> all scores 0 -> low
-Example 2 (high): "Max acetaminophen for cirrhosis?" -> 3000mg vs 2000mg vs 4000mg -> halluc=6, contra=9, uncert=7 -> high
-Example 3 (medium): "Best PostgreSQL pool size for 1000 users?" -> 50 / 100-200 / 50-100 -> halluc=1, contra=4, uncert=3 -> medium
+Example 1 (low): "Capital of France?" all say Paris -> halluc=0 contra=0 uncert=0 -> low
+Example 2 (high): "Max acetaminophen for cirrhosis?" 3000mg vs 2000mg vs 4000mg -> halluc=6 contra=9 uncert=7 -> high
+Example 3 (medium): "Best PostgreSQL pool size for 1000 users?" 50 / 100-200 / 50-100 -> halluc=1 contra=4 uncert=3 -> medium
 
-## Output Format (STRICT JSON, no markdown, no preamble)
-Output exactly ONE line of JSON:
+## Output Format (STRICT JSON, one line, no markdown, no preamble)
 
 {"hallucination_risk": <0-10>, "semantic_contradiction": <0-10>, "uncertainty_signals": <0-10>, "final_risk_level": "<low|medium|high>", "reasoning": "<2 short sentences>"}
-
-No other text. No explanation before or after."""
+"""
 
 
 def build_judge_prompt(record: dict) -> str:
+    """Format the record's 2-4 model responses into a judge-ready prompt."""
     resp = record["responses"]
-    return f"""Analyze this group of LLM responses:
+    # Map internal names to human-readable labels used by the judge prompt
+    display = {
+        "deepseek": "A (DeepSeek)",
+        "glm": "B (GLM)",
+        "qwen": "C (Qwen)",
+        "gemini": "D (Gemini)",
+    }
+    blocks = [f"Q: {record['question']}\n"]
+    for key, label in display.items():
+        content = resp.get(key)
+        if content:
+            blocks.append(f"{label}: {content}\n")
+    blocks.append("\nOutput your structured risk assessment as a single JSON line.")
+    return "\n".join(blocks)
 
-Q: {record['question']}
 
-A (DeepSeek): {resp.get('deepseek', '[no response]')}
-
-B (GLM): {resp.get('glm', '[no response]')}
-
-C (Qwen): {resp.get('qwen', '[no response]')}
-
-Output your structured risk assessment as a single JSON line."""
-
-
-def extract_json(text: str) -> dict | None:
-    """Extract a JSON object from the model's response (handles some formatting noise)."""
-    # Strip markdown fences if present
+def extract_json(text: str):
     text = text.strip()
     text = re.sub(r"^```(?:json)?\s*", "", text)
     text = re.sub(r"\s*```$", "", text)
-
-    # Try direct parse first
     try:
         return json.loads(text)
     except json.JSONDecodeError:
         pass
-
-    # Find first {...} block
     match = re.search(r"\{.*\}", text, re.DOTALL)
     if match:
         try:
@@ -115,7 +115,7 @@ def extract_json(text: str) -> dict | None:
     return None
 
 
-def validate_label(label: dict | None) -> bool:
+def validate_label(label) -> bool:
     if not isinstance(label, dict):
         return False
     for k in ("hallucination_risk", "semantic_contradiction", "uncertainty_signals"):
@@ -128,7 +128,7 @@ def validate_label(label: dict | None) -> bool:
 
 
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=2, min=2, max=30), reraise=True)
-async def judge_one(client, model: str, record: dict) -> dict | None:
+async def judge_one(client, model: str, record: dict):
     prompt = build_judge_prompt(record)
     resp = await client.chat.completions.create(
         model=model,
@@ -143,25 +143,25 @@ async def judge_one(client, model: str, record: dict) -> dict | None:
     label = extract_json(text)
     if not validate_label(label):
         return None
-    # Normalize scores to int
     for k in ("hallucination_risk", "semantic_contradiction", "uncertainty_signals"):
         label[k] = int(label[k])
     return label
 
 
-async def process_one(record: dict, client, model: str, sem: asyncio.Semaphore) -> dict | None:
+async def process_one(record: dict, client, model: str, sem: asyncio.Semaphore):
     async with sem:
         try:
             label = await judge_one(client, model, record)
         except Exception as e:
-            print(f"  [id={record['id']}] judge error: {type(e).__name__}", file=sys.stderr)
+            print(f"  [id={record['id']}] judge error: {type(e).__name__}: {str(e)[:100]}",
+                  file=sys.stderr)
             return None
         if not label:
             return None
         return {**record, "judgment": label}
 
 
-def load_raw() -> list[dict]:
+def load_raw() -> list:
     if not RAW_PATH.exists():
         print(f"ERROR: {RAW_PATH} not found. Run call_models.py first.", file=sys.stderr)
         sys.exit(1)
@@ -174,7 +174,7 @@ def load_raw() -> list[dict]:
     return records
 
 
-def load_labeled_ids() -> set[int]:
+def load_labeled_ids() -> set:
     done = set()
     if LABELED_PATH.exists():
         with open(LABELED_PATH, encoding="utf-8") as f:
@@ -188,18 +188,15 @@ def load_labeled_ids() -> set[int]:
     return done
 
 
-def compute_stats(labeled: list[dict]) -> dict:
+def compute_stats(labeled: list) -> dict:
     from collections import Counter
     levels = Counter(r["judgment"]["final_risk_level"] for r in labeled)
     domains = Counter(r["domain"] for r in labeled)
     langs = Counter(r["lang"] for r in labeled)
-
     cross = {}
     for r in labeled:
-        d = r["domain"]
-        lv = r["judgment"]["final_risk_level"]
+        d, lv = r["domain"], r["judgment"]["final_risk_level"]
         cross.setdefault(d, Counter())[lv] += 1
-
     total = len(labeled)
     return {
         "total_samples": total,
@@ -214,18 +211,28 @@ def compute_stats(labeled: list[dict]) -> dict:
 
 async def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mvp", action="store_true", help="Only label first 60")
+    parser.add_argument("--mvp", action="store_true")
     parser.add_argument("--limit", type=int)
     parser.add_argument("--no-resume", action="store_true")
+    parser.add_argument("--judge", choices=["claude", "gemini"],
+                        help="Force specific judge provider")
     args = parser.parse_args()
 
     providers = load_providers()
-    if JUDGE_PROVIDER not in providers:
-        print(f"ERROR: judge provider '{JUDGE_PROVIDER}' not configured.", file=sys.stderr)
-        print(f"Available: {list(providers.keys())}", file=sys.stderr)
+
+    # Select judge: user override > preference order
+    if args.judge:
+        judge_name = args.judge
+    else:
+        judge_name = next((n for n in JUDGE_PREFERENCE if n in providers), None)
+
+    if not judge_name or judge_name not in providers:
+        print(f"ERROR: no judge provider configured. Set ANTHROPIC_* or GOOGLE_API_KEY in .env",
+              file=sys.stderr)
+        print(f"Available providers: {list(providers.keys())}", file=sys.stderr)
         sys.exit(1)
 
-    p = providers[JUDGE_PROVIDER]
+    p = providers[judge_name]
     client = make_client(p)
     print(f"Meta-Judge: {p.name} ({p.model})")
 
@@ -241,13 +248,13 @@ async def main():
 
     if not todo:
         print("Nothing to do.")
-        # Still report stats on existing
-        with open(LABELED_PATH, encoding="utf-8") as f:
-            labeled = [json.loads(l) for l in f if l.strip()]
-        stats = compute_stats(labeled)
-        with open(STATS_PATH, "w", encoding="utf-8") as f:
-            json.dump(stats, f, indent=2, ensure_ascii=False)
-        print(json.dumps(stats["level_pct"], indent=2))
+        if LABELED_PATH.exists():
+            with open(LABELED_PATH, encoding="utf-8") as f:
+                labeled = [json.loads(l) for l in f if l.strip()]
+            stats = compute_stats(labeled)
+            with open(STATS_PATH, "w", encoding="utf-8") as f:
+                json.dump(stats, f, indent=2, ensure_ascii=False)
+            print(json.dumps(stats.get("level_pct", {}), indent=2))
         return
 
     max_concurrent = int(os.getenv("MAX_CONCURRENT", "5"))
@@ -257,8 +264,7 @@ async def main():
     mode = "w" if args.no_resume else "a"
 
     t0 = time.time()
-    ok = 0
-    bad = 0
+    ok, bad = 0, 0
     with open(LABELED_PATH, mode, encoding="utf-8") as fout:
         tasks = [process_one(r, client, p.model, sem) for r in todo]
         for coro in atqdm.as_completed(tasks, total=len(tasks), desc="Judging"):
@@ -272,7 +278,6 @@ async def main():
 
     dt = time.time() - t0
 
-    # Final stats
     with open(LABELED_PATH, encoding="utf-8") as f:
         labeled = [json.loads(l) for l in f if l.strip()]
     stats = compute_stats(labeled)
@@ -280,7 +285,7 @@ async def main():
         json.dump(stats, f, indent=2, ensure_ascii=False)
 
     print(f"\n{'=' * 60}")
-    print(f"Done in {dt:.1f}s ({len(todo)/dt*60:.1f} req/min)")
+    print(f"Done in {dt:.1f}s ({len(todo)/max(dt, 0.01)*60:.1f} req/min)")
     print(f"  Labeled: {ok} | Failed: {bad}")
     print(f"\nRisk Level Distribution:")
     for lv in ("low", "medium", "high"):

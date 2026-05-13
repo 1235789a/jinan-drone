@@ -18,10 +18,17 @@ model/adapter/*.safetensors
 checkpoints/
 
 # Data (may contain API outputs)
+data/seeds.jsonl
 data/raw_responses.jsonl
 data/labeled_train.jsonl
 data/train_chat.jsonl
 data/val_chat.jsonl
+data/stats.json
+data/batches/outputs/
+data/judge_batches/outputs/
+
+# Dry-run artifacts
+scripts/_dry_run_test.py
 
 # Secrets
 .env
