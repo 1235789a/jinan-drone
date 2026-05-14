@@ -33,10 +33,18 @@ class ProviderConfig:
     label: str      # display name used in prompts ("DeepSeek", "GLM", ...)
 
 
-# SiliconFlow model routing (2026-05). Flagship Pro tier by default.
-# Each is overridable in .env, e.g. DEEPSEEK_SF_MODEL=deepseek-ai/DeepSeek-V4-Flash
+# SiliconFlow model routing (2026-05).
+# FREE TIER models (confirmed working with 16 CNY signup credit):
+#   deepseek-ai/DeepSeek-V3       ← free
+#   zai-org/GLM-4.5               ← free
+#   Qwen/Qwen3-235B-A22B          ← free
+# PAID models (will 403 "Model is private" on free accounts):
+#   deepseek-ai/DeepSeek-V4-Pro   ← requires paid plan
+#   deepseek-ai/DeepSeek-V4-Flash ← requires paid plan
+# Override in .env if you have paid access:
+#   DEEPSEEK_SF_MODEL=deepseek-ai/DeepSeek-V4-Pro
 SILICONFLOW_MODELS = {
-    "deepseek": "deepseek-ai/DeepSeek-V4-Pro",
+    "deepseek": "deepseek-ai/DeepSeek-V3",
     "glm": "zai-org/GLM-4.5",
     "qwen": "Qwen/Qwen3-235B-A22B",
 }
