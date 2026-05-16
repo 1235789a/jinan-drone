@@ -11,7 +11,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 from peft import PeftModel
 
 # === Configuration ===
-BASE_MODEL_ID = "google/gemma-3-1b-it"
+BASE_MODEL_ID = "google/gemma-4-2b-it"
 ADAPTER_PATH = "./model/adapter"
 
 QUANTIZATION_CONFIG = BitsAndBytesConfig(

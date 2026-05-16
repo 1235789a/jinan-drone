@@ -1,6 +1,7 @@
 """
-Day 2: Gemma 3 1B QLoRA 微调训练脚本
+Day 2: Gemma 4 2B (E2B) QLoRA 微调训练脚本
 设计用于 Kaggle T4/P100 环境运行。
+比赛要求: Gemma 4 Good Hackathon - 必须使用 Gemma 4 模型
 """
 
 import json
@@ -17,7 +18,7 @@ from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 from trl import SFTTrainer
 
 # === Configuration ===
-MODEL_ID = "google/gemma-3-1b-it"
+MODEL_ID = "google/gemma-4-2b-it"
 OUTPUT_DIR = "./checkpoints"
 FINAL_MODEL_DIR = "./model/adapter"
 
