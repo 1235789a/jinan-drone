@@ -43,10 +43,13 @@ class ProviderConfig:
 #   deepseek-ai/DeepSeek-V4-Flash ← requires paid plan
 # Override in .env if you have paid access:
 #   DEEPSEEK_SF_MODEL=deepseek-ai/DeepSeek-V4-Pro
+# CONFIRMED FREE on SiliconFlow 16 CNY signup credit (May 2026):
 SILICONFLOW_MODELS = {
     "deepseek": "deepseek-ai/DeepSeek-V3",
-    "glm": "zai-org/GLM-4.5",
-    "qwen": "Qwen/Qwen3-235B-A22B",
+    "qwen": "Qwen/Qwen2.5-7B-Instruct",
+    # Below are PAID-ONLY (403 on free accounts), kept for reference:
+    # "glm": "zai-org/GLM-4.5",
+    # "qwen_big": "Qwen/Qwen3-235B-A22B",
 }
 
 GEMINI_DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai"
@@ -88,10 +91,13 @@ def _claude() -> Optional[ProviderConfig]:
 def load_providers() -> dict[str, ProviderConfig]:
     """Return {provider_name: ProviderConfig} for all configured providers."""
     providers: dict[str, ProviderConfig] = {}
-    for name, label in [("deepseek", "DeepSeek"), ("glm", "GLM"), ("qwen", "Qwen")]:
-        p = _siliconflow(name, label)
-        if p:
-            providers[name] = p
+    # Only build SiliconFlow providers for models listed in SILICONFLOW_MODELS
+    sf_labels = {"deepseek": "DeepSeek", "qwen": "Qwen"}
+    for name, label in sf_labels.items():
+        if name in SILICONFLOW_MODELS:
+            p = _siliconflow(name, label)
+            if p:
+                providers[name] = p
     for builder in (_gemini, _claude):
         p = builder()
         if p:

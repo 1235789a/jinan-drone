@@ -17,7 +17,7 @@ echo "[1/4] Generating 60 seed questions..."
 python scripts/generate_seeds.py --mvp
 
 echo ""
-echo "[2/4] Calling 3 models for each seed..."
+echo "[2/4] Calling 2 models for each seed..."
 python scripts/call_models.py --mvp
 
 echo ""

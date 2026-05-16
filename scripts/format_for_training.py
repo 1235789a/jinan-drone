@@ -26,11 +26,7 @@ Question: {question}
 
 Response A (DeepSeek): {a}
 
-Response B (GLM): {b}
-
-Response C (Qwen): {c}
-
-Response D (Gemini): {d}
+Response B (Qwen): {b}
 
 Evaluate along these dimensions:
 1. Hallucination Risk (0-10)
@@ -49,11 +45,9 @@ Reasoning: {r}"""
 def format_one(item: dict):
     resp = item.get("responses", {})
     a = resp.get("deepseek")
-    b = resp.get("glm")
-    c = resp.get("qwen")
-    d = resp.get("gemini")
-    # Need at least 2 valid responses (3 is ideal, 4 is best)
-    if sum(1 for x in (a, b, c, d) if x) < 2:
+    b = resp.get("qwen")
+    # Need both responses
+    if not a or not b:
         return None
 
     j = item.get("judgment")
@@ -62,10 +56,8 @@ def format_one(item: dict):
 
     user = USER_TEMPLATE.format(
         question=item["question"],
-        a=a or "[no response available]",
-        b=b or "[no response available]",
-        c=c or "[no response available]",
-        d=d or "[no response available]",
+        a=a,
+        b=b,
     )
     assistant = ASSISTANT_TEMPLATE.format(
         risk=j["final_risk_level"],

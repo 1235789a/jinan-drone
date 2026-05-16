@@ -85,9 +85,7 @@ def build_judge_prompt(record: dict) -> str:
     # Map internal names to human-readable labels used by the judge prompt
     display = {
         "deepseek": "A (DeepSeek)",
-        "glm": "B (GLM)",
-        "qwen": "C (Qwen)",
-        "gemini": "D (Gemini)",
+        "qwen": "B (Qwen)",
     }
     blocks = [f"Q: {record['question']}\n"]
     for key, label in display.items():

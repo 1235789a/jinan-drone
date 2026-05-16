@@ -33,7 +33,9 @@ SEEDS_PATH = Path(__file__).parent.parent / "data" / "seeds.jsonl"
 RAW_RESPONSES_PATH = Path(__file__).parent.parent / "data" / "raw_responses.jsonl"
 
 # Data-source providers. `claude` is reserved for the Judge, not queried here.
-DATA_SOURCES = ["deepseek", "glm", "qwen", "gemini"]
+# Only DeepSeek and Qwen confirmed working on SiliconFlow free tier (May 2026).
+# GLM-4.5 and Gemini both 403/rate-limit on free accounts.
+DATA_SOURCES = ["deepseek", "qwen"]
 
 SYSTEM_PROMPT = """You are a deterministic answer API.
 
